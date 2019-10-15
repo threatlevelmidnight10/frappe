@@ -35,13 +35,16 @@ def enqueue(method, queue='default', timeout=None, event=None,
 		:param now: if now=True, the method is executed via frappe.call
 		:param kwargs: keyword arguments to be passed to the method
 	'''
+	#get which kafka or Redis conf
+		
+
 	# To handle older implementations
 	is_async = kwargs.pop('async', is_async)
 
 	if now or frappe.flags.in_migrate:
 		return frappe.call(method, **kwargs)
 
-	q = get_queue(queue, is_async=is_async)
+	q = get_queue(queue, type, is_async=is_async)
 	if not timeout:
 		timeout = queue_timeout.get(queue) or 300
 	queue_args = {
@@ -195,16 +198,19 @@ def get_queue_list(queue_list=None):
 	else:
 		return default_queue_list
 
-def get_queue(queue, is_async=True):
+def get_queue(queue, type, is_async=True):
 	'''Returns a Queue object tied to a redis connection'''
-	validate_queue(queue)
+	if type == 'redis':
+		validate_queue(queue)
 
-	kwargs = {
-		'connection': get_redis_conn(),
-		'async': is_async
-	}
-
-	return Queue(queue, **kwargs)
+		kwargs = {
+			'connection': get_redis_conn(),
+			'async': is_async
+		}
+		return Queue(queue, **kwargs)
+	else:
+		kafka_producer_instance = KafkaQueue.get_producer()
+		return kafka_producer_instance
 
 def validate_queue(queue, default_queue_list=None):
 	if not default_queue_list:
@@ -234,3 +240,57 @@ def test_job(s):
 	import time
 	print('sleeping...')
 	time.sleep(s)
+
+def get_kafka_conf():
+	'''
+	Returns Kafka configuration for the local site 
+	'''
+	conf = frappe.local.conf.kafka
+	if not conf:
+		raise Exception(f'Kafka Not Configured for {frappe.local.site}')
+	return conf
+
+class KafkaQueue(object):
+	producer_map = {}
+
+	def get_producer():
+		'''
+		Returns producer instance associated with the site
+		Single Producer for a single site
+		'''
+		site = frappe.local.site
+		try:
+			return KafkaQueue.producer_map[site]
+		except KeyError:
+			producer = KafkaQueue.producer_map[site] = KafkaQueue()
+			return producer
+
+	def __init__(self):
+		'''
+		Kafka Queue object with following properties,
+		1. site -  site to which kafka cluster will listen to
+		2. kafka conf - conf settings of kafka for the site (if any)
+		3. producer - Kafka Producer Init Instance with config of site 
+		'''
+		self.site = frappe.local.site
+		self.kafka_conf = get_kafka_conf()
+		print('Connecting to', self.kafka_conf.get('bootstrap.servers'))
+		self.producer = kafka.KafkaProducer(
+			bootstrap_servers=self.kafka_conf.get('bootstrap.servers'),
+			max_block_ms=4000,
+		)
+	
+	def enqueue_call(self, *_, kwargs, **__):
+		'''
+		Enqueue Function for Kafka Instance 
+		Params: 1.kwargs - queue_args with job metadata (method, method_name, site, user, etc)
+		'''
+		#get task instance
+		task = Task(**kwargs)
+		serialized = pickle.dumps(task)	
+		compressed = zlib.compress(serialized)
+		topic = f'kafka_{task.queue}'
+		print(compressed)
+		self.producer.send(topic= topic, value= compressed)
+		#flush all buffered data
+		self.producer.flush()
