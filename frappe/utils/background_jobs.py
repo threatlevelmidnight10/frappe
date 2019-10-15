@@ -35,8 +35,8 @@ def enqueue(method, queue='default', timeout=None, event=None,
 		:param now: if now=True, the method is executed via frappe.call
 		:param kwargs: keyword arguments to be passed to the method
 	'''
-	#get which kafka or Redis conf
-		
+	#get which of kafka or Redis to use for background workers 
+	type = 'redis' if not frappe.local.conf else 'kafka' 
 
 	# To handle older implementations
 	is_async = kwargs.pop('async', is_async)
@@ -44,7 +44,7 @@ def enqueue(method, queue='default', timeout=None, event=None,
 	if now or frappe.flags.in_migrate:
 		return frappe.call(method, **kwargs)
 
-	q = get_queue(queue, type, is_async=is_async)
+	q = get_queue(queue, type, is_async=is_async) #get queue instance (kafka or redis) kafka if kafka config present
 	if not timeout:
 		timeout = queue_timeout.get(queue) or 300
 	queue_args = {
